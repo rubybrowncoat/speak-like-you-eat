@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { exec } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -32,6 +32,7 @@ const PACKED_FILES = [
   "src/model-completion.ts",
   "src/model-picker.ts",
   "src/model-rewrite.ts",
+  "src/omp.ts",
   "src/prompt.ts",
   "src/rewrite.ts",
 ];
@@ -49,6 +50,7 @@ type PackageManifest = {
   publishConfig: { access: string };
   files: string[];
   pi: { extensions: string[]; image: string };
+  omp: { extensions: string[]; image: string };
 };
 
 type PackageLock = {
@@ -56,14 +58,16 @@ type PackageLock = {
   packages: { "": { version: string } };
 };
 
-const runCommand = promisify(execFile);
+const runCommand = promisify(exec);
 
-test("the package manifest declares public release metadata, its extension, README-linked governed documents, and the 14-file public allowlist", async () => {
+test("the package manifest declares public release metadata, its host extensions, README-linked governed documents, and the 15-file public allowlist", async () => {
   const packageUrl = new URL("../package.json", import.meta.url);
   const packageJson = JSON.parse(await readFile(packageUrl, "utf8")) as PackageManifest;
   const packageLockUrl = new URL("../package-lock.json", import.meta.url);
   const packageLock = JSON.parse(await readFile(packageLockUrl, "utf8")) as PackageLock;
-  const extensionPath = "./src/index.ts";
+  const piExtensionPath = "./src/index.ts";
+  const ompExtensionPath = "./src/omp.ts";
+  const packageImage = "https://raw.githubusercontent.com/wtfzambo/speak-like-you-eat/refs/heads/main/imgs/front.png";
 
   assert.match(packageJson.version, STABLE_SEMVER);
   assert.equal(packageLock.version, packageJson.version);
@@ -91,11 +95,16 @@ test("the package manifest declares public release metadata, its extension, READ
   );
   assert.deepEqual(packageJson.files, PACKAGE_FILES);
   assert.deepEqual(packageJson.pi, {
-    extensions: [extensionPath],
-    image: "https://raw.githubusercontent.com/wtfzambo/speak-like-you-eat/refs/heads/main/imgs/front.png",
+    extensions: [piExtensionPath],
+    image: packageImage,
+  });
+  assert.deepEqual(packageJson.omp, {
+    extensions: [ompExtensionPath],
+    image: packageImage,
   });
 
-  await access(new URL(extensionPath, packageUrl));
+  await access(new URL(piExtensionPath, packageUrl));
+  await access(new URL(ompExtensionPath, packageUrl));
   await access(new URL("../README.md", import.meta.url));
   for (const documentPath of README_LINKED_DOCUMENTS) {
     await access(new URL(`../${documentPath}`, import.meta.url));
@@ -108,7 +117,7 @@ test("the package manifest declares public release metadata, its extension, READ
   assert.ok(!readme.includes("backlog/docs/runbooks/doc-2%20-%20SLYE-sandbox-manual-checks.md"));
 
   const packed = JSON.parse(
-    (await runCommand("npm", ["pack", "--dry-run", "--json"], { cwd: new URL("../", import.meta.url) })).stdout,
+    (await runCommand("npm pack --dry-run --json", { cwd: new URL("../", import.meta.url) })).stdout,
   ) as Array<{ files: Array<{ path: string }> }>;
   const packedArchive = packed[0];
   if (!packedArchive) {
@@ -116,6 +125,8 @@ test("the package manifest declares public release metadata, its extension, READ
   }
   assert.deepEqual(packedArchive.files.map((file) => file.path).sort(), PACKED_FILES);
 
-  const extension = await import(new URL(extensionPath, packageUrl).href);
-  assert.equal(typeof extension.default, "function");
+  const piExtension = await import(new URL(piExtensionPath, packageUrl).href);
+  const ompExtension = await import(new URL(ompExtensionPath, packageUrl).href);
+  assert.equal(typeof piExtension.default, "function");
+  assert.equal(typeof ompExtension.default, "function");
 });
