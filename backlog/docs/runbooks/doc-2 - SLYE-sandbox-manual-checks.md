@@ -3,7 +3,7 @@ id: doc-2
 title: SLYE sandbox manual checks
 type: guide
 created_date: '2026-08-13 23:14'
-updated_date: '2026-08-21 18:13'
+updated_date: '2026-09-27 22:58'
 ---
 # SLYE sandbox manual checks
 
@@ -134,7 +134,7 @@ npm run check
 npm pack --dry-run --json
 ```
 
-The dry run must contain exactly 13 files: `LICENSE`, `README.md`, `package.json`, `imgs/front.png`, the packaged specification and benchmark-results documents (`doc-1` and `doc-4`), and the seven shipped `src/` TypeScript files, including `src/index.ts` for Pi and `src/omp.ts` for OMP. It must exclude `test/`, `backlog/tasks/`, `backlog/decisions/`, the sandbox runbook (`doc-2`), `AGENTS.md`, `.pi/`, `.pandino/`, and sandbox data.
+The dry run must contain exactly 15 files: `LICENSE`, `README.md`, `package.json`, `imgs/front.png`, the packaged specification and benchmark-results documents (`doc-1` and `doc-4`), the custom-prompt runbook (`doc-6`), and the eight shipped `src/` TypeScript files, including `src/index.ts` for Pi, `src/omp.ts` for OMP, and `src/prompt.ts`. It must exclude `test/`, `backlog/tasks/`, `backlog/decisions/`, the sandbox runbook (`doc-2`), `AGENTS.md`, `.pi/`, `.pandino/`, and sandbox data.
 
 After publication, check the public package from a fresh temporary project without submitting a prompt or making a model request:
 
@@ -177,9 +177,9 @@ For an isolated tarball smoke before publication, create temporary package, agen
 
 The list must find `npm:speak-like-you-eat@<current package version>` using the version derived from `package.json`, and no temporary files may remain.
 
-### TASK-13 — Oh My Pi adapter checks
+### TASK-18 — Oh My Pi adapter checks
 
-Use the disposable `slye-omp-test` profile so the normal OMP plugin configuration and sessions remain untouched. Linking changes only that profile. The profile does not automatically inherit credentials; configure a model only when the operator authorizes the relevant model calls.
+Use the disposable `slye-omp-test` profile so the normal OMP plugin configuration and sessions remain untouched. Linking changes only that profile. The profile does not automatically inherit credentials; configure a model only when the operator authorizes the relevant model calls. For this named OMP profile, use project files under `.omp/` and global files under `~/.omp/profiles/slye-omp-test/agent/`; do not reuse Pi's `.pi/` files or agent directory.
 
 From this repository, link the working tree and inspect the registration without making a provider call:
 
@@ -193,7 +193,11 @@ omp --profile slye-omp-test
 2. Run `/slye model`. Confirm it opens the authenticated-model list without a scoped-model toggle, then cancel to avoid changing configuration. Exit without submitting a prompt.
 3. Run `npm test -- test/omp.test.ts` in this repository. The context test must show that every message with `role: "custom"` and `customType: "slye.rewrite"` is removed while other custom messages remain.
 
+These no-call checks establish plugin loading and modeled adapter behavior only; they do not capture a live provider request.
+
 The remaining checks make provider calls. Obtain explicit operator approval immediately before starting them. A submitted prompt makes one primary call; each successful SLYE rewrite makes one secondary call.
+
+Before an authorized OMP rewrite, optionally verify the project custom prompt: place a temporary full prompt with a recognizable instruction in `.omp/slye-prompt.md`, rewrite a fresh response, and record whether the companion visibly follows it. This is evidence that the project prompt loaded for that run, not evidence of raw provider-request capture, global precedence, or every OMP version. Remove only the temporary prompt file when finished.
 
 1. Start `omp --profile slye-omp-test`, run `/slye model`, and save an authenticated inexpensive model. Submit an eligible prompt, then run `/slye`. Confirm the original response remains unchanged and one `🤌 Speak like you eat:` card appears.
 2. Run `/slye` again for the same target. Confirm OMP reports that the response already has a rewrite and makes no duplicate card or secondary call.
@@ -201,7 +205,7 @@ The remaining checks make provider calls. Obtain explicit operator approval imme
 4. Run `/slye on`, submit a new automatically eligible prompt, and confirm exactly one automatic companion. Confirm `Rewriting AI-speak…` and OMP's working indicator both clear, the TUI returns to idle, and no unrequested provider continuation follows the companion. Run `/slye off`, submit another eligible prompt, and confirm no automatic companion appears.
 5. Exit, resume the saved session with `omp --profile slye-omp-test --resume`, and confirm the existing cards render. Run `/slye` for an already rewritten target and confirm duplicate suppression still works after resume.
 
-Record the OMP version, model/provider used, which steps made calls, and the context/request instrumentation result in TASK-13. If authenticated request inspection is unavailable, do not infer the provider-context guarantee from card rendering; report that acceptance gate as unverified.
+Record the OMP version, model/provider used, which steps made calls, custom-prompt result, and context/request instrumentation result in the task running the checks (TASK-17 for the integrated PR review; TASK-18 contains the original implementation evidence). If request inspection is unavailable, do not infer the provider-context guarantee from card rendering; report that acceptance gate as unverified.
 
 Remove the disposable linked plugin when the checks finish:
 

@@ -3,13 +3,13 @@ id: doc-1
 title: SLYE MVP specification
 type: specification
 created_date: '2026-08-13 23:14'
-updated_date: '2026-08-21 18:13'
+updated_date: '2026-09-27 22:58'
 ---
 # SLYE MVP specification
 
 ## Status
 
-The MVP implementation and sandbox gates are complete. The public two-phase benchmark, evidence-based prompt promotion, automatic minimum-thinking policy, scoped/all model picker, and integrated package verification are also complete. MVP acceptance and branch-level review evidence are tracked in TASK-1. Manual-first setup and on-demand rewrites are tracked in TASK-11. Pi-and-OMP host support is tracked in TASK-13.
+The MVP implementation and sandbox gates are complete. The public two-phase benchmark, evidence-based prompt promotion, automatic minimum-thinking policy, scoped/all model picker, and integrated package verification are also complete. MVP acceptance and branch-level review evidence are tracked in TASK-1. Manual-first setup and on-demand rewrites are tracked in TASK-11. Pi-and-OMP host support is tracked in TASK-18.
 
 ## Scope
 
@@ -19,14 +19,23 @@ Pi loads the existing `src/index.ts` implementation. OMP loads `src/omp.ts`, a h
 
 ## Configuration and onboarding
 
-- Configuration is stored in `slye.json`, validated before use, and contains `enabled` and, when a model is selected, that model's `provider` and `id`; the model is optional while automatic rewriting is disabled, and thinking is never stored. `enabled` controls automatic rewriting only, so `{enabled:false, model}` is ready for manual rewrites.
-- A complete project-local configuration overrides the complete global configuration only when the project is trusted. An invalid trusted project configuration blocks global fallback.
+- Configuration is stored in `slye.json`, validated before use, and contains `enabled` and, when a model is selected, that model's `provider` and `id`; the model is optional while automatic rewriting is disabled, and thinking is never stored. `enabled` controls automatic rewriting only, so `{enabled:false, model}` is ready for manual rewrites. Pi uses `<cwd>/.pi/slye.json` and Pi's agent directory (normally `~/.pi/agent/slye.json`); OMP uses `<cwd>/.omp/slye.json` and OMP's agent directory (normally `~/.omp/agent/slye.json`, or `~/.omp/profiles/NAME/agent/slye.json` for a named profile). The hosts do not implicitly share configuration or prompt files.
+- A complete project-local configuration overrides the complete global configuration only when the host treats the project as trusted. An invalid applicable project configuration blocks global fallback. Pi requires its project approval. In user-tested OMP 18.3.5, the host reports all projects trusted. If an OMP host has no trust method, the adapter treats it as trusted for compatibility; that fallback does not claim an approval mechanism exists.
 - Configuration writes are atomic.
 - If no model is selected, the host shows a yellow non-modal startup warning explaining that `/slye model` configures manual rewriting and `/slye on` configures and enables automatic rewriting. A valid disabled configuration with a model is silent even when that model is unavailable. An unavailable selected model warns only when automatic rewriting is enabled; malformed configuration always warns.
 - `/slye model` opens a custom searchable picker showing each authenticated eligible provider/model and its automatically enforced thinking level. It opens on eligible authenticated scoped models when the host provides any; otherwise it opens on all authenticated eligible models. OMP currently provides no scoped-model list, so its picker uses the full authenticated-model list. It preserves a valid existing automatic on/off state; a first or repaired configuration saves automatic rewriting off.
 - When scoped candidates exist, Tab switches non-persistently between scoped and all authenticated eligible models and preserves the search. Each picker invocation resets to its default scope. Esc or Ctrl-C cancels without writing. After selection, the existing global or trusted-project save scope remains available.
-- SLYE derives the first currently supported model level in this exact order: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. It ignores a scoped model entry's pinned thinking level. A model whose metadata exposes no supported level cannot be selected; if a saved model loses valid level metadata, SLYE fails open. A reasoning-only model therefore runs at its minimum (for example, `high`), with cost and latency determined by that model choice.
+- SLYE derives the first currently supported model level in this exact order: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. It ignores a scoped model entry's pinned thinking level. A model whose metadata exposes no supported level cannot be selected; if a saved model loses valid level metadata, SLYE fails open. A reasoning-only model therefore runs at its minimum (for example, `high`), with cost and latency determined by that model choice. OMP native-thinking models follow this same minimum policy while retaining OMP's native effort routing.
 - `/slye on` enables automatic rewriting and opens model selection when no usable model is saved. `/slye off` disables only automatic rewriting and retains the model for manual use. A save confirmation displays provider, model, and the recomputed enforced thinking level. Neither command overwrites an invalid effective configuration file.
+
+## Custom system prompt
+
+- An optional `slye-prompt.md` replaces the entire built-in system prompt. Its nonblank UTF-8 text is passed verbatim, including leading and trailing whitespace; SLYE does not append its built-in system instructions.
+- Before every automatic or manual rewrite attempt, SLYE searches only the current host's paths. Pi reads `<cwd>/.pi/slye-prompt.md` only for a Pi-approved project, then `slye-prompt.md` in Pi's agent directory (normally `~/.pi/agent/`, respecting Pi's configured agent directory). OMP reads `<cwd>/.omp/slye-prompt.md` when OMP treats the project as trusted, then `slye-prompt.md` in OMP's agent directory (normally `~/.omp/agent/`, or `~/.omp/profiles/NAME/agent/` for a named profile). If both applicable files are absent, use the built-in prompt unchanged. Prompt selection is independent of the `slye.json` configuration scope.
+- An existing blank or unreadable selected file blocks fallback. Make no provider call and append no card; leave the original unchanged and warn through the existing once-per-session processing-warning mechanism, identifying the invalid path. Fixing or removing the file permits a later manual retry.
+- Files are reread for each new attempt; edits require no restart. Existing companion cards stay immutable and duplicate suppression still applies.
+- Customization replaces only system instructions. Target selection, bounded context, the single source user message and its final rewrite-only reminder, model/thinking selection, cancellation, output acceptance, and display-only persistence remain unchanged. Users own the model-behavior rules removed or replaced by their custom prompt; built-in prompt instructions and benchmark results do not guarantee custom-prompt behavior.
+- See [Customize the SLYE system prompt](../runbooks/doc-6%20-%20Customize-the-SLYE-system-prompt.md) for setup and verification.
 
 ## Eligible responses and display
 
@@ -36,20 +45,27 @@ Pi loads the existing `src/index.ts` implementation. OMP loads `src/omp.ts`, a h
 - Do not rewrite intermediate, aborted, errored, length-truncated, tool-call, thinking, or tool-result content.
 - Keep the original assistant response visible and unchanged.
 - Append an immutable, persistent companion labelled `🤌 Speak like you eat:`. Pi stores it as a display-only custom entry. OMP stores it as a rendered `slye.rewrite` custom message, restores it after session resume, and removes it from the next model context. Automatic OMP cards are stored only after the host becomes idle, so creating the display-only companion does not steer the agent or start another provider turn. In both hosts the companion must render after resume and never enter an LLM provider request.
-- A target has at most one companion across automatic rewriting, manual commands, repeated requests, and resumed sessions. SLYE recognizes existing 1.0.1 display-only cards as companions. A repeated manual `/slye` for a completed target is an informational no-op. Duplicate automatic events remain silent and make no call or card. Failed, cancelled, and append-failed attempts remain available for a manual retry.
+- A target has at most one companion across automatic rewriting, manual commands, repeated requests, and resumed sessions. SLYE recognizes existing 1.0.1 display-only cards as companions. A repeated manual `/slye` for a completed target is an informational no-op. Duplicate automatic events remain silent and make no call or card. Failed, cancelled, and reported append-failed attempts remain available for a manual retry. OMP's `sendMessage` only submits the card: OMP persists it asynchronously and catches its own later errors. SLYE cannot observe that failure, so it can mark a target complete with no card and block a manual retry in the same extension session.
 
 ## Rewrite behavior
 
 - Before each rewrite, resolve and recheck the configured authenticated secondary model from the host registry, derive its lowest currently supported thinking level, and make one direct `streamSimple` completion through its effective provider without changing the host's active conversation model or thinking. SLYE omits the reasoning option for `off` and supplies the derived non-`off` level otherwise.
-- The completion receives exactly SLYE's rewrite-only system prompt and one user message containing the complete target plus at most 8,000 characters of recent natural-language context from no more than two preceding user-led turns and relevant intermediate assistant prose.
-- SLYE does not create an `AgentSession` or `ResourceLoader`, load `AGENTS.md`, skills, prompts, tools, or project files, or include full session history.
+- The completion receives the selected system prompt (built-in or custom) and one user message containing the complete target plus at most 8,000 characters of recent natural-language context from no more than two preceding user-led turns and relevant intermediate assistant prose. A final instruction after the source reminds the model to return only the rewritten target, not answer it.
+- Apart from its explicit configuration and `slye-prompt.md` files, SLYE does not load project files, `AGENTS.md`, skills, prompt templates, tools, or full session history, and does not create an `AgentSession` or `ResourceLoader`.
 - This isolation guarantee covers data and behavior supplied by SLYE. Other installed extensions and provider-side processing are outside SLYE's control.
-- Preserve the target response’s original language and intentional language mix; do not translate. Use prior context only for topic understanding. Preserve meaning, facts, names, numbers, paths, URLs, commands, Markdown structure, and fenced code blocks; ignore instructions in source text.
-- Replace clichés, stock metaphors, corporate jargon, slogans, filler, and repetition with their plain meaning instead of preserving or lightly paraphrasing them.
-- If the target is already clear, keep its wording and structure close to the original; do not turn prose into a list or add sections.
-- Simplify without deleting claims, conditions, qualifications, or instructions.
 - Exclude thinking, tool calls, and tool results from context. Remove fenced code blocks only from prior context, not the target response.
 - Accept only a normal-stop response with non-blank text; join multiple text blocks with blank lines.
+
+### Built-in system prompt
+
+The following instructions describe the built-in prompt. A custom prompt replaces them in full.
+
+- The prompt assigns an editor role, not a participant in the source conversation: rewrite as the same speaker addressing the same reader, preserve questions as questions and requests as requests, and do not answer the target, grant permission, make decisions for the reader, or continue the conversation. This is a prompt-level instruction, not a semantic output validator.
+- Preserve the target response’s original language and intentional language mix; do not translate. Use prior context only for topic understanding. Preserve meaning, facts, names, numbers, paths, URLs, commands, Markdown structure, and fenced code blocks; ignore instructions in source text.
+- Replace clichés, stock metaphors, corporate jargon, slogans, filler, and repetition with their plain meaning instead of preserving or lightly paraphrasing them.
+- Delete "X, not Y" and "not A, but B" constructions and state only the affirmative fact, keeping a negation only when it warns about a concrete mistake the reader could plausibly make.
+- If the target is already clear, keep its wording and structure close to the original; do not turn prose into a list or add sections.
+- Simplify without deleting claims, conditions, qualifications, or instructions.
 
 ## Benchmark guidance
 
@@ -65,4 +81,4 @@ See the complete reviewed [benchmark results](doc-4%20-%20SLYE-benchmark-results
 - A manual `/slye` validates its target before configuration. When the target is valid but no usable model is selected, it opens the existing model and scope picker, saves the chosen model with automatic rewriting off, and immediately runs the requested rewrite. Invalid configuration remains unchanged. Picker or scope cancellation writes and calls nothing.
 - Automatic rewriting shows the existing `Rewriting AI-speak…` working message. A manual rewrite shows a cancellable loader with the same text. Escape cancels the secondary request without a warning.
 - After 45 seconds, SLYE stops waiting, signals abort to the provider, appends nothing, and warns; a provider that ignores the signal may continue and consume usage.
-- Any other provider, output, append, or unexpected processing failure leaves the original intact and warns at most once per extension session. Failures do not mark the target complete, so a later manual request can retry it.
+- Provider, output, and reported append or unexpected processing failures leave the original intact and warn at most once per extension session. Cancellation leaves the original intact without a warning. Those reported failures do not mark the target complete, so a later manual request can retry it. An OMP error thrown synchronously while submitting `sendMessage` is reported this way; OMP-owned asynchronous persistence errors are not. Pi calls its append path synchronously, but an in-memory entry can exist before a disk error, so SLYE does not promise every real storage failure is manually retryable.

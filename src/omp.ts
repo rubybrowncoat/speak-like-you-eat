@@ -6,6 +6,7 @@ import speakLikeYouEat from "./index.ts";
 const REWRITE_ENTRY_TYPE = "slye.rewrite";
 const REWRITE_HEADING = "🤌 Speak like you eat:";
 const IDLE_POLL_INTERVAL_MS = 10;
+const OMP_THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 type PiHandler = (event: unknown, context: ExtensionContext) => unknown;
 type PiCommandOptions = {
@@ -20,6 +21,20 @@ type RuntimeTheme = {
 };
 type PiModelRegistry = ExtensionContext["modelRegistry"];
 type PiSessionManager = ExtensionContext["sessionManager"];
+type PiModel = NonNullable<ReturnType<PiModelRegistry["find"]>>;
+type OmpThinkingLevel = (typeof OMP_THINKING_LEVELS)[number];
+type OmpNativeThinking = {
+  efforts: readonly OmpThinkingLevel[];
+  requiresEffort?: boolean;
+  suppressWhenOff?: boolean;
+};
+type OmpNativeModel = {
+  reasoning?: boolean;
+  thinking?: OmpNativeThinking;
+};
+type OmpModel = PiModel & OmpNativeModel;
+type PiThinkingLevel = "off" | OmpThinkingLevel;
+type PiThinkingLevelMap = Record<PiThinkingLevel, string | null>;
 
 type OmpModelRegistry = Omit<
   Pick<PiModelRegistry, "find" | "hasConfiguredAuth" | "getAvailable" | "getApiKeyAndHeaders" | "getProvider">,
@@ -72,8 +87,9 @@ function createOmpExtensionApi(runtime: OmpRuntimeApi): ExtensionAPI {
   const registerMessageRenderer = runtime.registerMessageRenderer.bind(runtime);
   const sendMessage = runtime.sendMessage.bind(runtime);
   // OMP serializes callbacks until appendEntry captures the current context.
-  // A deferred event returns after scheduling its idle timer; the background
-  // operation still awaits delivery or failure so the Pi core can clean up.
+  // A deferred event returns after scheduling its idle timer. The background
+  // operation waits for host idle and submits sendMessage; asynchronous host
+  // persistence is not observable here.
   let activeContext: OmpContext | undefined;
   let releaseHostForDeferredSend: (() => void) | undefined;
 
@@ -103,7 +119,6 @@ function createOmpExtensionApi(runtime: OmpRuntimeApi): ExtensionAPI {
     } finally {
       activeContext = previousContext;
       releaseHostForDeferredSend = previousRelease;
-      void operationPromise.catch(() => {});
     }
   }
 
@@ -197,7 +212,7 @@ function isUninitializedOmpMarkdownTheme(error: unknown): boolean {
 function adaptOmpContext(context: OmpContext): ExtensionContext {
   const mode = Reflect.has(context, "mode") ? context.mode : "tui";
   const signal = Reflect.has(context, "signal") ? context.signal : undefined;
-  const scopedModels = Array.isArray(context.scopedModels) ? context.scopedModels : [];
+  const scopedModels = Array.isArray(context.scopedModels) ? normalizeOmpScopedModels(context.scopedModels) : [];
   const isProjectTrusted =
     typeof context.isProjectTrusted === "function" ? context.isProjectTrusted.bind(context) : () => true;
   const waitForIdle = typeof context.waitForIdle === "function" ? context.waitForIdle.bind(context) : undefined;
@@ -216,6 +231,8 @@ function adaptOmpContext(context: OmpContext): ExtensionContext {
 }
 
 function adaptOmpModelRegistry(registry: OmpModelRegistry): PiModelRegistry {
+  const find = registry.find.bind(registry);
+  const getAvailable = registry.getAvailable.bind(registry);
   const getProvider =
     typeof registry.getProvider === "function"
       ? registry.getProvider.bind(registry)
@@ -226,12 +243,67 @@ function adaptOmpModelRegistry(registry: OmpModelRegistry): PiModelRegistry {
         };
 
   return {
-    find: registry.find.bind(registry),
+    find: (provider, id) => normalizeOmpModel(find(provider, id)),
     hasConfiguredAuth: registry.hasConfiguredAuth.bind(registry),
-    getAvailable: registry.getAvailable.bind(registry),
+    getAvailable: () => getAvailable().map((model) => normalizeOmpModel(model)),
     getApiKeyAndHeaders: registry.getApiKeyAndHeaders.bind(registry),
     getProvider,
   } as PiModelRegistry;
+}
+
+function normalizeOmpScopedModels(
+  scopedModels: NonNullable<OmpContext["scopedModels"]>,
+): ExtensionContext["scopedModels"] {
+  return scopedModels.map((scopedModel) => {
+    const model = normalizeOmpModel(scopedModel.model);
+    if (model === scopedModel.model) {
+      return scopedModel;
+    }
+
+    return { ...scopedModel, model };
+  });
+}
+
+function normalizeOmpModel<T extends PiModel | undefined>(model: T): T {
+  if (model === undefined) {
+    return model;
+  }
+
+  const nativeModel = model as OmpModel;
+  if (nativeModel.reasoning !== true || !hasNativeThinking(nativeModel.thinking)) {
+    return model;
+  }
+
+  return {
+    ...model,
+    thinkingLevelMap: createPiThinkingLevelMap(nativeModel.thinking),
+  } as T;
+}
+
+function hasNativeThinking(thinking: unknown): thinking is OmpNativeThinking {
+  if (!isRecord(thinking) || !Array.isArray(thinking.efforts)) {
+    return false;
+  }
+
+  return thinking.efforts.every((effort) => OMP_THINKING_LEVELS.includes(effort as OmpThinkingLevel));
+}
+
+function createPiThinkingLevelMap(thinking: OmpNativeThinking): PiThinkingLevelMap {
+  const thinkingLevelMap: PiThinkingLevelMap = {
+    off: thinking.requiresEffort === true && thinking.suppressWhenOff !== true ? null : "off",
+    minimal: null,
+    low: null,
+    medium: null,
+    high: null,
+    xhigh: null,
+    max: null,
+  };
+
+  for (const effort of thinking.efforts) {
+    thinkingLevelMap[effort] = effort;
+  }
+
+  return thinkingLevelMap;
 }
 
 function adaptOmpSessionManager(sessionManager: OmpSessionManager): PiSessionManager {

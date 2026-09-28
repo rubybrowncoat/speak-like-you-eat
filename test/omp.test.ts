@@ -1,17 +1,26 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import {
   type AssistantMessage,
+  type Context,
   createAssistantMessageEventStream,
   registerApiProvider,
   unregisterApiProviders,
 } from "@earendil-works/pi-ai/compat";
-import { type AgentEndEvent, type ExtensionAPI, initTheme, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import {
+  type AgentEndEvent,
+  CONFIG_DIR_NAME,
+  type ExtensionAPI,
+  initTheme,
+  type SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import { writeConfigAtomically } from "../src/config.ts";
+import type { ThinkingLevel } from "../src/model-completion.ts";
 import speakLikeYouEatOmp from "../src/omp.ts";
+import { PROMPT_FILENAME } from "../src/prompt.ts";
 
 initTheme("dark", false);
 
@@ -29,6 +38,30 @@ type SentMessage = {
   details: unknown;
   attribution: string;
 };
+type NativeThinkingLevel = Exclude<ThinkingLevel, "off">;
+type NativeThinking = {
+  efforts: readonly NativeThinkingLevel[];
+  requiresEffort?: boolean;
+  suppressWhenOff?: boolean;
+  effortRouting?: Partial<Record<NativeThinkingLevel, string>>;
+};
+type MockModel = {
+  provider: string;
+  id: string;
+  name: string;
+  api: string;
+  baseUrl: string;
+  reasoning: boolean;
+  thinking?: NativeThinking;
+  thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
+  requestModelId?: string;
+};
+type ScopedModel = { model: MockModel; [key: string]: unknown };
+
+const GLOBAL_SYSTEM_PROMPT = "Use the global OMP rewrite instructions.";
+const PROJECT_SYSTEM_PROMPT = "Use the trusted OMP project rewrite instructions.";
+const REPAIRED_PROJECT_SYSTEM_PROMPT = "Use the repaired OMP project rewrite instructions.";
+const UPDATED_GLOBAL_SYSTEM_PROMPT = "Use the updated global OMP rewrite instructions.";
 
 class OmpRuntime {
   readonly sentMessages: SentMessage[] = [];
@@ -116,7 +149,9 @@ class OmpRuntime {
 }
 
 class MockProvider {
+  readonly contexts: Context[] = [];
   readonly models: unknown[] = [];
+  readonly reasoning: Array<ThinkingLevel | undefined> = [];
   readonly signals: AbortSignal[] = [];
   calls = 0;
   #display: string;
@@ -127,11 +162,13 @@ class MockProvider {
 
   streamSimple(
     model: unknown,
-    _context: unknown,
-    options: { signal: AbortSignal },
+    context: Context,
+    options: { signal: AbortSignal; reasoning?: ThinkingLevel },
   ): { result: () => Promise<unknown> } {
     this.calls += 1;
+    this.contexts.push(context);
     this.models.push(model);
+    this.reasoning.push(options.reasoning);
     this.signals.push(options.signal);
     return {
       result: async () => response(this.#display),
@@ -140,30 +177,26 @@ class MockProvider {
 }
 
 class MockModelRegistry {
-  readonly model = {
-    provider: "test",
-    id: "model",
-    name: "Mock model",
-    api: "ollama-chat",
-    baseUrl: "https://model.example.test",
-    reasoning: false,
-  };
+  readonly model: MockModel;
+  readonly availableModels: MockModel[];
   #provider: MockProvider;
 
-  constructor(provider: MockProvider) {
+  constructor(provider: MockProvider, model = mockModel(), availableModels: MockModel[] = [model]) {
     this.#provider = provider;
+    this.model = model;
+    this.availableModels = availableModels;
   }
 
-  find(provider: string, id: string): typeof this.model | undefined {
+  find(provider: string, id: string): MockModel | undefined {
     return provider === this.model.provider && id === this.model.id ? this.model : undefined;
   }
 
   hasConfiguredAuth(model: unknown): boolean {
-    return model === this.model;
+    return typeof model === "object" && model !== null && "provider" in model && model.provider === this.model.provider;
   }
 
-  getAvailable(): Array<typeof this.model> {
-    return [this.model];
+  getAvailable(): MockModel[] {
+    return this.availableModels;
   }
 
   async getApiKeyAndHeaders(): Promise<{ ok: true }> {
@@ -265,6 +298,7 @@ class BoundOmpContext {
   readonly modelRegistry: MockModelRegistry;
   readonly sessionManager: MockSessionManager;
   readonly ui: MockUi;
+  readonly scopedModels?: ScopedModel[];
   waitForIdleCalls = 0;
   #runtime?: OmpRuntime;
   #trusted: boolean;
@@ -275,6 +309,7 @@ class BoundOmpContext {
     sessionManager: MockSessionManager;
     runtime?: OmpRuntime;
     ui?: MockUi;
+    scopedModels?: ScopedModel[];
     trusted?: boolean;
   }) {
     this.cwd = options.cwd;
@@ -282,6 +317,7 @@ class BoundOmpContext {
     this.sessionManager = options.sessionManager;
     this.#runtime = options.runtime;
     this.ui = options.ui ?? new MockUi();
+    this.scopedModels = options.scopedModels;
     this.#trusted = options.trusted ?? false;
   }
 
@@ -405,6 +441,326 @@ test("manually rewrites through bound OMP services and persists a custom message
   assert.deepEqual(runtime.sendOptions, [{ triggerTurn: false }]);
 });
 
+test("maps mandatory native thinking to canonical requests and all-model picker labels", async (t) => {
+  const directory = await setupConfiguredDirectory(t, false);
+  const provider = new MockProvider();
+  const model = mockModel({
+    reasoning: true,
+    thinking: { efforts: ["high"], requiresEffort: true },
+  });
+  const registry = new MockModelRegistry(provider, model);
+  const ui = new MockUi({ customInputs: [["\r"]], selectAnswers: ["All projects"] });
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager([messageEntry("target", assistant("Short response."))]),
+    ui,
+  });
+  const runtime = createExtension();
+
+  await runtime.command("slye").handler("model", context);
+  await runtime.command("slye").handler("", context);
+
+  assert.deepEqual(ui.notifications, [
+    { message: "SLYE manual rewrites configured with test / model · thinking: high for All projects.", type: "info" },
+  ]);
+  assert.deepEqual(provider.reasoning, ["high"]);
+  assert.notStrictEqual(provider.models[0], registry.model);
+  assert.deepEqual((provider.models[0] as MockModel).thinking, model.thinking);
+  assert.deepEqual((provider.models[0] as MockModel).thinkingLevelMap, {
+    off: null,
+    minimal: null,
+    low: null,
+    medium: null,
+    high: "high",
+    xhigh: null,
+    max: null,
+  });
+  assert.equal(registry.model.thinkingLevelMap, undefined);
+});
+
+test("uses the canonical native minimum instead of the default-routed effort", async (t) => {
+  const directory = await setupConfiguredDirectory(t, false);
+  const provider = new MockProvider();
+  const model = mockModel({
+    reasoning: true,
+    requestModelId: "high-route",
+    thinking: {
+      efforts: ["high", "low"],
+      requiresEffort: true,
+      effortRouting: { low: "low-route", high: "high-route" },
+    },
+  });
+  const registry = new MockModelRegistry(provider, model);
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager([messageEntry("target", assistant("Short response."))]),
+  });
+  const runtime = createExtension();
+
+  await runtime.command("slye").handler("", context);
+
+  assert.deepEqual(provider.reasoning, ["low"]);
+  assert.equal((provider.models[0] as MockModel).requestModelId, "high-route");
+});
+
+test("keeps optional native thinking off", async (t) => {
+  const directory = await setupConfiguredDirectory(t, false);
+  const provider = new MockProvider();
+  const registry = new MockModelRegistry(provider, mockModel({ reasoning: true, thinking: { efforts: ["low"] } }));
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager([messageEntry("target", assistant("Short response."))]),
+  });
+  const runtime = createExtension();
+
+  await runtime.command("slye").handler("", context);
+
+  assert.deepEqual(provider.reasoning, [undefined]);
+});
+
+test("keeps suppressible mandatory native thinking off", async (t) => {
+  const directory = await setupConfiguredDirectory(t, false);
+  const provider = new MockProvider();
+  const registry = new MockModelRegistry(
+    provider,
+    mockModel({
+      reasoning: true,
+      thinking: { efforts: ["high"], requiresEffort: true, suppressWhenOff: true },
+    }),
+  );
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager([messageEntry("target", assistant("Short response."))]),
+  });
+  const runtime = createExtension();
+
+  await runtime.command("slye").handler("", context);
+
+  assert.deepEqual(provider.reasoning, [undefined]);
+});
+
+test("keeps legacy Pi thinking models unchanged", async (t) => {
+  const directory = await setupConfiguredDirectory(t, false);
+  const provider = new MockProvider();
+  const model = mockModel({
+    reasoning: true,
+    thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null },
+  });
+  const registry = new MockModelRegistry(provider, model);
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager([messageEntry("target", assistant("Short response."))]),
+  });
+  const runtime = createExtension();
+
+  await runtime.command("slye").handler("", context);
+
+  assert.deepEqual(provider.reasoning, ["high"]);
+  assert.strictEqual(provider.models[0], registry.model);
+  assert.strictEqual(registry.model.thinkingLevelMap, model.thinkingLevelMap);
+});
+
+test("normalizes native thinking in scoped model discovery", async (t) => {
+  const directory = await setupConfiguredDirectory(t, false);
+  const provider = new MockProvider();
+  const model = mockModel({ reasoning: true, thinking: { efforts: ["high"], requiresEffort: true } });
+  const registry = new MockModelRegistry(provider, model, []);
+  const ui = new MockUi({ customInputs: [["\r"]], selectAnswers: ["All projects"] });
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager([]),
+    scopedModels: [{ model, source: "test" }],
+    ui,
+  });
+  const runtime = createExtension();
+
+  await runtime.command("slye").handler("model", context);
+
+  assert.deepEqual(ui.notifications, [
+    { message: "SLYE manual rewrites configured with test / model · thinking: high for All projects.", type: "info" },
+  ]);
+});
+
+test("does not expose a malformed mandatory native thinking model", async (t) => {
+  const directory = await setupConfiguredDirectory(t, true);
+  const provider = new MockProvider();
+  const registry = new MockModelRegistry(
+    provider,
+    mockModel({ reasoning: true, thinking: { efforts: [], requiresEffort: true } }),
+  );
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager([]),
+  });
+  const runtime = createExtension();
+
+  await runtime.handler("session_start")({}, context);
+
+  assert.equal(provider.calls, 0);
+  assert.deepEqual(context.ui.notifications, [
+    { message: "SLYE's selected model is unavailable. Run /slye model.", type: "warning" },
+  ]);
+});
+
+test("uses a trusted OMP project prompt before the global prompt", async (t) => {
+  const directory = await setupConfiguredDirectory(t, false);
+  const prompts = promptPaths(directory);
+  const target = assistant("Short response.");
+  const provider = new MockProvider("Project prompt response.");
+  const registry = new MockModelRegistry(provider);
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager([messageEntry("target", target)]),
+    trusted: true,
+  });
+  const runtime = createExtension();
+
+  await writePrompt(prompts.global, GLOBAL_SYSTEM_PROMPT);
+  await writePrompt(prompts.project, PROJECT_SYSTEM_PROMPT);
+  await runtime.command("slye").handler("", context);
+
+  assert.equal(provider.calls, 1);
+  assert.deepEqual(
+    provider.contexts.map((request) => request.systemPrompt),
+    [PROJECT_SYSTEM_PROMPT],
+  );
+  assert.deepEqual(runtime.sentMessages, [rewriteMessage("Project prompt response.", "target")]);
+});
+
+test("uses the global prompt for an explicitly untrusted OMP project", async (t) => {
+  const directory = await setupConfiguredDirectory(t, false);
+  const prompts = promptPaths(directory);
+  const target = assistant("Short response.");
+  const provider = new MockProvider("Global prompt response.");
+  const registry = new MockModelRegistry(provider);
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager([messageEntry("target", target)]),
+    trusted: false,
+  });
+  const runtime = createExtension();
+
+  await writePrompt(prompts.global, GLOBAL_SYSTEM_PROMPT);
+  await writePrompt(prompts.project, PROJECT_SYSTEM_PROMPT);
+  await runtime.command("slye").handler("", context);
+
+  assert.equal(provider.calls, 1);
+  assert.deepEqual(
+    provider.contexts.map((request) => request.systemPrompt),
+    [GLOBAL_SYSTEM_PROMPT],
+  );
+  assert.deepEqual(runtime.sentMessages, [rewriteMessage("Global prompt response.", "target")]);
+});
+
+test("uses the global prompt when the OMP project has no prompt", async (t) => {
+  const directory = await setupConfiguredDirectory(t, false);
+  const prompts = promptPaths(directory);
+  const target = assistant("Short response.");
+  const provider = new MockProvider("Global prompt response.");
+  const registry = new MockModelRegistry(provider);
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager([messageEntry("target", target)]),
+    trusted: true,
+  });
+  const runtime = createExtension();
+
+  await writePrompt(prompts.global, GLOBAL_SYSTEM_PROMPT);
+  await runtime.command("slye").handler("", context);
+
+  assert.equal(provider.calls, 1);
+  assert.deepEqual(
+    provider.contexts.map((request) => request.systemPrompt),
+    [GLOBAL_SYSTEM_PROMPT],
+  );
+  assert.deepEqual(runtime.sentMessages, [rewriteMessage("Global prompt response.", "target")]);
+});
+
+test("blocks a blank trusted OMP project prompt and retries the repaired target manually", async (t) => {
+  const directory = await setupConfiguredDirectory(t, true);
+  const prompts = promptPaths(directory);
+  const target = assistant("complete response ".repeat(20));
+  const provider = new MockProvider("Repaired prompt response.");
+  const registry = new MockModelRegistry(provider);
+  const sessionManager = new MockSessionManager([
+    messageEntry("user", user("please explain")),
+    messageEntry("target", target),
+  ]);
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager,
+    trusted: true,
+  });
+  const runtime = createExtension();
+  const event = { type: "agent_end", messages: [target] } as AgentEndEvent;
+
+  await writePrompt(prompts.global, GLOBAL_SYSTEM_PROMPT);
+  await writePrompt(prompts.project, " \n");
+  await runtime.handler("agent_end")(event, context);
+
+  assert.equal(provider.calls, 0);
+  assert.deepEqual(runtime.sentMessages, []);
+  assert.deepEqual(context.ui.notifications, [
+    {
+      message: `SLYE system prompt is invalid at ${prompts.project}. Fix or remove it.`,
+      type: "warning",
+    },
+  ]);
+
+  await writePrompt(prompts.project, REPAIRED_PROJECT_SYSTEM_PROMPT);
+  await runtime.command("slye").handler("", context);
+
+  assert.equal(provider.calls, 1);
+  assert.deepEqual(
+    provider.contexts.map((request) => request.systemPrompt),
+    [REPAIRED_PROJECT_SYSTEM_PROMPT],
+  );
+  assert.deepEqual(runtime.sentMessages, [rewriteMessage("Repaired prompt response.", "target")]);
+});
+
+test("reloads the OMP global prompt for fresh manual targets", async (t) => {
+  const directory = await setupConfiguredDirectory(t, false);
+  const prompts = promptPaths(directory);
+  const firstTarget = assistant("First response.");
+  const secondTarget = assistant("Second response.");
+  const branch = [messageEntry("first-target", firstTarget)];
+  const provider = new MockProvider("Fresh prompt response.");
+  const registry = new MockModelRegistry(provider);
+  const context = new BoundOmpContext({
+    cwd: directory,
+    modelRegistry: registry,
+    sessionManager: new MockSessionManager(branch),
+  });
+  const runtime = createExtension();
+
+  await writePrompt(prompts.global, GLOBAL_SYSTEM_PROMPT);
+  await runtime.command("slye").handler("", context);
+  await writePrompt(prompts.global, UPDATED_GLOBAL_SYSTEM_PROMPT);
+  branch.push(messageEntry("second-target", secondTarget));
+  await runtime.command("slye").handler("", context);
+
+  assert.equal(provider.calls, 2);
+  assert.deepEqual(
+    provider.contexts.map((request) => request.systemPrompt),
+    [GLOBAL_SYSTEM_PROMPT, UPDATED_GLOBAL_SYSTEM_PROMPT],
+  );
+  assert.deepEqual(runtime.sentMessages, [
+    rewriteMessage("Fresh prompt response.", "first-target"),
+    rewriteMessage("Fresh prompt response.", "second-target"),
+  ]);
+});
+
 test("manually rewrites through the compat fallback when OMP omits getProvider", async (t) => {
   const directory = await setupConfiguredDirectory(t, false);
   const target = assistant("Short response.");
@@ -491,7 +847,7 @@ test("automatically rewrites once with a missing OMP signal", async (t) => {
   assert.deepEqual(runtime.sendOptions, [{ triggerTurn: false }]);
 });
 
-test("warns on a deferred OMP send failure and leaves the target manually retryable", async (t) => {
+test("warns on a synchronous OMP send rejection and leaves the target manually retryable", async (t) => {
   const directory = await setupConfiguredDirectory(t, true);
   const target = assistant("complete response ".repeat(20));
   const provider = new MockProvider("Plain retryable response.");
@@ -581,6 +937,18 @@ function createExtension(): OmpRuntime {
   return runtime;
 }
 
+function mockModel(overrides: Partial<MockModel> = {}): MockModel {
+  return {
+    provider: "test",
+    id: "model",
+    name: "Mock model",
+    api: "ollama-chat",
+    baseUrl: "https://model.example.test",
+    reasoning: false,
+    ...overrides,
+  };
+}
+
 async function setupConfiguredDirectory(t: test.TestContext, enabled: boolean): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "slye-omp-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -592,6 +960,23 @@ async function setupConfiguredDirectory(t: test.TestContext, enabled: boolean): 
     model: { provider: "test", id: "model" },
   });
   return join(directory, "project");
+}
+
+function promptPaths(directory: string): { global: string; project: string } {
+  const agentDirectory = process.env.PI_CODING_AGENT_DIR;
+  if (agentDirectory === undefined) {
+    throw new Error("Test agent directory is not configured.");
+  }
+
+  return {
+    global: join(agentDirectory, PROMPT_FILENAME),
+    project: join(directory, CONFIG_DIR_NAME, PROMPT_FILENAME),
+  };
+}
+
+async function writePrompt(path: string, text: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, text, "utf8");
 }
 
 function messageEntry(id: string, message: AgentMessage): SessionEntry {
