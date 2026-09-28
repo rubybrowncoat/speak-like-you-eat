@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.0](https://github.com/wtfzambo/speak-like-you-eat/compare/v1.3.0...v1.4.0) (2026-09-28)
+
+
+### Features
+
+* add Oh My Pi support ([d6d76df](https://github.com/wtfzambo/speak-like-you-eat/commit/d6d76dfc7e69a4da59b0676d319643fdd9601724))
+
+
+### Bug Fixes
+
+* integrate OMP support with current main ([de1f3ce](https://github.com/wtfzambo/speak-like-you-eat/commit/de1f3ce1a1dda479999012492aed380d27861bc2))
+
 ## [1.3.0](https://github.com/wtfzambo/speak-like-you-eat/compare/v1.2.0...v1.3.0) (2026-09-25)
 
 
