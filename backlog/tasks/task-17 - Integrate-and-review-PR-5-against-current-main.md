@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@zambo'
 created_date: '2026-09-27 20:16'
-updated_date: '2026-09-28 11:19'
+updated_date: '2026-09-28 11:20'
 labels: []
 dependencies: []
 references:
@@ -86,6 +86,8 @@ Completed pending housekeeping after user go-ahead to the proposed remaining wor
 Final-change taste/spec reviews complete with no remaining must-fix; both independently validate checks (spec127 tests). Single docs-review found one must-fix: README blanket retry guarantee contradicted accepted OMP persistence limitation. Parent fixed that one bullet to name cancellation/timeout/provider retry and link authoritative host-specific storage limitation; direct one-line docs correction, no code changes. Docs review otherwise positive on paths/trust, authority and evidence limits. Proceeding to once-per-branch final review on integrated working tree against origin/main; no commits yet.
 
 Whole-change final reviewer verdict MERGE; no must-fix. Independently ran full check127/127, pack15, doctor clean, compared working tree vs origin/main and native OMP18.3.5 source. Minor optional comments pinned to17.4 and low-value guard-test gap; not changing code or opening more review loops. Review explicitly stopped at operator time objection. Remaining unverified (NOT demonstrated defects): side-provider paths bypass transformContext but custom message content is empty/details not converted; OMP30s automatic-handler cap vs SLYE45s timeout; OMP agent_end willContinue semantics. Normal conversation isolation evidenced by user hook-boundary PASS only. Accepted async storage limitation remains settled. Final recommendation: eligible to merge reviewed local result, pending user authorization for commit/push and remote merge. No remote actions yet.
+
+2026-09-28: user authorized local commit and push. Created merge commit de1f3ce (parents original PR5ca9f05 and main86ef2f0), hooks pass127 tests, and pushed fast-forward to rubybrowncoat/speak-like-you-eat feature/omp successfully. No merge into main or GitHub approval submission performed. User .omp/ remains untracked/excluded. Review-time diagnosis: final reviewer logged173 tool calls and~85min duration; no operational bound and broad external-runtime scope caused overrun, compounded by orchestrator repetition. No Pandino configuration changed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
